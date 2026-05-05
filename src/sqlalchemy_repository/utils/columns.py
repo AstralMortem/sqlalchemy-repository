@@ -1,5 +1,5 @@
 from typing import Any
-from sqlalchemy import inspect as sa_inspect, UnaryExpression
+from sqlalchemy import Select, inspect as sa_inspect, UnaryExpression
 from sqlalchemy.orm import RelationshipProperty
 
 
@@ -53,3 +53,12 @@ def make_order_expr(model: type, token: str) -> UnaryExpression:
     path = field.split("__")
     col_attr, _joins = resolve_column(model, path)
     return col_attr.desc() if desc else col_attr.asc()
+
+
+def apply_group_by(model: type, statement: Select):  # noqa: F821
+    mapper = sa_inspect(model)
+    pk_cols = mapper.primary_key
+
+    for col in pk_cols:
+        stmt = statement.group_by(col)
+    return stmt

@@ -4,8 +4,9 @@ from .expressions import F, Q
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, subqueryload, selectinload
 from typing import Any, Generic
-from .utils.columns import make_order_expr
+from .utils.columns import make_order_expr, apply_group_by
 from .utils.relations import build_loader_tree
+from .aggregations import Aggregate
 
 
 class QuerySet(Generic[ModelT]):
@@ -35,6 +36,7 @@ class QuerySet(Generic[ModelT]):
         clone._joins = kw.get("_joins", self._joins)
         clone._loader_opts = kw.get("_loader_opts", self._loader_opts)
         clone._result_cache = None
+        clone._annotations = kw.get("_annotations", self._annotations)
         return clone
 
     def _add_joins(self, *joins: list[tuple[Any, Any]]):
@@ -145,15 +147,24 @@ class QuerySet(Generic[ModelT]):
 
     def annotate(self, **kwargs: Any) -> "QuerySet[ModelT]":
         qs = self._clone()
-        qs._annotations = getattr(self, "_annotations", {}).copy()
+
+        collected_joins: list[tuple[Any, Any]] = []
         add_cols = []
+
         for alias, expr in kwargs.items():
-            col_expr = expr.resolve(self._model) if isinstance(expr, F) else expr
+            if isinstance(expr, Aggregate):
+                col_expr = expr.resolve(self._model, collected_joins)
+            elif isinstance(expr, F):
+                col_expr = expr.resolve(self._model)
+            else:
+                col_expr = expr
             labeled = col_expr.label(alias)
-            qs._annotations[alias] = labeled
+            self._annotations[alias] = labeled
             add_cols.append(labeled)
+
+        qs = self._add_joins(*collected_joins)
         qs._stmt = qs._stmt.add_columns(*add_cols)
-        qs._annotations = qs._annotations
+
         return qs
 
     # Main methods
@@ -219,10 +230,24 @@ class QuerySet(Generic[ModelT]):
         return items, total
 
     async def aggregate(self, **kwargs) -> dict[str, Any]:
-        agg_cols = [expr.label(alias) for alias, expr in kwargs.items()]
-        stmt = self._build_stmt().with_only_columns(*agg_cols)
+        collected_joins: list[tuple[Any, Any]] = []
+        cols = []
+
+        for _, expr in kwargs.items():
+            if isinstance(expr, Aggregate):
+                col = expr.resolve(self._model, collected_joins)
+            else:
+                col = expr
+            cols.append(col)
+
+        qs = self._add_joins(*collected_joins)
+        stmt = qs._build_stmt().with_only_columns(*cols).order_by(None)
+
         row = (await self._session.execute(stmt)).one()
         return dict(zip(kwargs.keys(), row))
 
     def __repr__(self):
         return f"<QuerySet model={self._model.__name__}>"
+
+    def compile(self):
+        return self._stmt.compile(compile_kwargs={"literal_binds": True})

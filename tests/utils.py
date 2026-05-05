@@ -1,6 +1,6 @@
 import pytest
 from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, relationship, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -12,6 +12,7 @@ class ModelC(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String)
+    b_list: Mapped[list["ModelB"]] = relationship(back_populates="c")
 
 
 class ModelB(Base):
@@ -21,7 +22,7 @@ class ModelB(Base):
     year = Column(Integer, default=0)
     qty = Column(Integer, default=0)
 
-    c = relationship("ModelC")
+    c: Mapped[ModelC] = relationship(back_populates="b_list")
 
 
 class ModelA(Base):
