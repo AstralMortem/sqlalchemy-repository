@@ -227,8 +227,8 @@ async def test_complex_query2(session, data):
         .prefetch_related("comments")
     )
 
-    items1 = await qs1.all()
-    items2 = await qs2.all()
+    item1 = await qs1.first()
+    item2 = await qs2.first()
 
-    assert items1[0].comments_count == 3
-    assert items2[0].comments_count == 2
+    assert item1.comments_count == 3
+    assert item2.comments_count == 2

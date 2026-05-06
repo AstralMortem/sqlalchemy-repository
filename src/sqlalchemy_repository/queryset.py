@@ -241,7 +241,8 @@ class QuerySet(Generic[ModelT]):
         base_qs = self._clone()
         base_qs._annotations = {}
 
-        instances = await base_qs.all()
+        result = await base_qs._execute()
+        instances = result.scalars().all()
         if not instances:
             return []
 
@@ -286,22 +287,28 @@ class QuerySet(Generic[ModelT]):
             for alias, _ in aggs:
                 output[pid][alias] = getattr(row, alias)
         return output
-
+    
+    def _is_annotated(self) -> bool:
+        return self._annotations and any(isinstance(v, Aggregate) for v in self._annotations.values())
+    
     async def all(self) -> list[ModelT]:
-        if self._annotations and any(
-            isinstance(v, Aggregate) for v in self._annotations.values()
-        ):
+        if self._is_annotated():
             return await self._execute_with_aggregation()
         result = await self._execute()
         return result.scalars().all()
 
     async def first(self) -> ModelT | None:
+        if self._is_annotated():
+            qs = self._clone()
+            qs._limit_val = 1
+            res = await qs._execute_with_aggregation()
+            return res[0] if res else None
         stmt = self._build_select().limit(1)
         if self._debug:
             log.debug("QuerySet SQL (first):\n%s", stmt)
         result = await self._session.execute(stmt)
-        return result.scalars().first()
-
+        return result.scalar_one_or_none()
+    
     async def last(self) -> ModelT | None:
         qs = self._clone()
         if qs._order_fields:
