@@ -34,7 +34,7 @@ _LOOKUP_ALIASES: dict[str, str] = {
     "range": "between",
 }
 
-_ALL_LOOKUPS = {e.value for e in Lookup} | set(_LOOKUP_ALIASES)
+ALL_LOOKUPS = {e.value for e in Lookup} | set(_LOOKUP_ALIASES)
 
 
 def apply_lookup(column: Column, lookup: str, value: Any) -> ClauseElement:
@@ -97,28 +97,5 @@ def apply_lookup(column: Column, lookup: str, value: Any) -> ClauseElement:
             return extract("day", column) == value
         case _:
             raise ValueError(
-                f"Unknown lookup '{lookup}'. Available: {sorted(_ALL_LOOKUPS)}"
+                f"Unknown lookup '{lookup}'. Available: {sorted(ALL_LOOKUPS)}"
             )
-
-
-def split_lookup(key: str) -> tuple[list[str], str]:
-    """
-    'generation__model__name__icontains'
-       → (['generation', 'model', 'name'], 'icontains')
-
-    'name'
-       → (['name'], 'exact')
-
-    'name__icontains'
-       → (['name'], 'icontains')
-    """
-    parts = key.split("__")
-
-    # Walk right-to-left: the rightmost part that IS a lookup is the lookup.
-    for i in range(len(parts) - 1, 0, -1):
-        candidate = parts[i]
-        if candidate in _ALL_LOOKUPS:
-            return parts[:i], candidate
-
-    # No lookup token found → default to "exact"
-    return parts, "exact"

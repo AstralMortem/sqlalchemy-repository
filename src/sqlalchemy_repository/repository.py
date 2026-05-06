@@ -40,8 +40,7 @@ class RetrieveMixin(Generic[ModelT, PK], _Base[ModelT]):
 class CreateMixin(_Base[ModelT]):
     async def create(self, payload: dict, _commit: bool = False):
         resolved = {
-            k: v.resolve(self.model) if isinstance(v, F) else v
-            for k, v in payload.items()
+            k: v._resolve() if isinstance(v, F) else v for k, v in payload.items()
         }
         obj = self.model(**resolved)
         self.session.add(obj)
@@ -80,7 +79,7 @@ class CreateMixin(_Base[ModelT]):
 class UpdateMixin(_Base[ModelT]):
     async def update(self, obj: ModelT, payload: dict, _commit: bool = False):
         for k, v in payload.items():
-            setattr(obj, k, v.resolve(self.model) if isinstance(v, F) else v)
+            setattr(obj, k, v._resolve() if isinstance(v, F) else v)
         await self.session.flush()
         if _commit:
             await self.session.commit()

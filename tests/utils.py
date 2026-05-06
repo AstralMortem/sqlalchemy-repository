@@ -1,33 +1,48 @@
-import pytest
-from sqlalchemy import Column, Integer, String, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, relationship, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import ForeignKey
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class ModelC(Base):
-    __tablename__ = "c"
+class User(Base):
+    __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    b_list: Mapped[list["ModelB"]] = relationship(back_populates="c")
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str]
 
-
-class ModelB(Base):
-    __tablename__ = "b"
-    id = Column(Integer, primary_key=True)
-    c_id = Column(Integer, ForeignKey("c.id"))
-    year = Column(Integer, default=0)
-    qty = Column(Integer, default=0)
-
-    c: Mapped[ModelC] = relationship(back_populates="b_list")
+    profile: Mapped["Profile"] = relationship(back_populates="user", uselist=False)
+    posts: Mapped[list["Post"]] = relationship(back_populates="author")
 
 
-class ModelA(Base):
-    __tablename__ = "a"
-    id = Column(Integer, primary_key=True)
-    b_id = Column(Integer, ForeignKey("b.id"))
-    name = Column(String)
-    b = relationship("ModelB")
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    age: Mapped[int]
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+    user: Mapped[User] = relationship(back_populates="profile")
+
+
+class Post(Base):
+    __tablename__ = "posts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str]
+    rating: Mapped[float]
+    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+    author: Mapped[User] = relationship(back_populates="posts")
+    comments: Mapped[list["Comment"]] = relationship(back_populates="post")
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    text: Mapped[str]
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
+
+    post: Mapped[Post] = relationship(back_populates="comments")

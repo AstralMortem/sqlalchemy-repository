@@ -12,17 +12,3 @@ PK = TypeVar("PK")
 FilterExpr = Union[ColumnElement[bool], "Q"]
 
 ColRef = Union[str, ColumnElement[Any]]
-
-
-class _Asc:
-    def __repr__(self) -> str:
-        return "ASC"
-
-
-class _Desc:
-    def __repr__(self) -> str:
-        return "DESC"
-
-
-ASC = _Asc()
-DESC = _Desc()

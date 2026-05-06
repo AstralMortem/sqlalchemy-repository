@@ -1,64 +1,148 @@
 from typing import Any
-from sqlalchemy import Select, inspect as sa_inspect, UnaryExpression
-from sqlalchemy.orm import RelationshipProperty
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.orm import RelationshipProperty, selectinload
+from .joins import JoinSpec
+from .lookups import ALL_LOOKUPS, apply_lookup
 
 
-def resolve_column(model: type, path: list[str]) -> tuple[Any, list[tuple[Any, Any]]]:
+def resolve_column(model: type, path: str) -> Any:
     """
-    Walk a model attribute path and return:
-        (column_attribute, [(parent_model, relationship_attr), ...])
+    Resolve a dotted / dunder path to a SQLAlchemy column.
 
+    Example:
+        resolve_column(User, "profile__country")   → Profile.country
+        resolve_column(Order, "user__profile__age") → Profile.age
     """
-    joins: list[tuple[Any, Any]] = []
+    parts = path.split("__")
     current_model = model
 
-    for i, part in enumerate(path[:-1]):
+    for part in parts[:-1]:
         mapper = sa_inspect(current_model)
-        try:
-            rel: RelationshipProperty = mapper.relationships[part]
-        except KeyError:
-            available = list(mapper.relationships.keys())
-            raise AttributeError(
-                f"'{current_model.__name__}' has no relationship '{part}'. "
-                f"Available: {available}"
-            )
-        rel_attr = getattr(current_model, part)
+        rel: RelationshipProperty = mapper.relationships[part]
+        current_model = rel.mapper.class_
+
+    col_name = parts[-1]
+    return getattr(current_model, col_name)
+
+
+def resolve_pk_fields(model: type):
+    return sa_inspect(model).primary_key
+
+
+def resolve_pk_name(model: type):
+    pks = resolve_pk_fields(model)
+    return pks[0].name
+
+
+def resolve_pk_column(model: type):
+    pk_name = resolve_pk_name(model)
+    return resolve_column(model, pk_name)
+
+
+def resolve_parent_fk(model: type, joins: list[JoinSpec]):
+    if not joins:
+        raise ValueError("Aggregation requires at least one relation")
+
+    first_join = joins[0]
+    _, remote = first_join.on_clause.left, first_join.on_clause.right
+    return remote
+
+
+def deduplicate_joins(joins: list[JoinSpec]) -> list[JoinSpec]:
+    seen = set()
+    result = []
+
+    for j in joins:
+        key = (j.target_model, str(j.on_clause))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(j)
+
+    return result
+
+
+def resolve_path_with_joins(
+    model: type,
+    path: str,
+) -> tuple[Any, list[JoinSpec]]:
+    """
+    Walk a dunder path, collect required JOINs, return (column, joins).
+
+    Example:
+        path = "profile__country"
+        → joins=[JoinSpec(Profile, User.profile_id == Profile.id)]
+        → col = Profile.country
+    """
+
+    parts = path.split("__")
+    joins: list[JoinSpec] = []
+    current_model = model
+
+    for part in parts[:-1]:
+        mapper = sa_inspect(current_model)
+        rel: RelationshipProperty = mapper.relationships[part]
         next_model = rel.mapper.class_
-        joins.append((current_model, rel_attr))
+
+        # Build ON clause from the relationship's local/remote pairs
+        local_col, remote_col = next(iter(rel.synchronize_pairs))
+        on_clause = local_col == remote_col
+
+        joins.append(
+            JoinSpec(
+                target_model=next_model,
+                on_clause=on_clause,
+                isouter=True,
+            )
+        )
         current_model = next_model
 
-    # Final part is the column
-    col_name = path[-1]
-    try:
-        col_attr = getattr(current_model, col_name)
-    except AttributeError:
-        mapper = sa_inspect(current_model)
-        cols = [c.key for c in mapper.columns]
-        raise AttributeError(
-            f"'{current_model.__name__}' has no column '{col_name}'. "
-            f"Available columns: {cols}"
+    col = getattr(current_model, parts[-1])
+    return col, deduplicate_joins(joins)
+
+
+def build_filter_clause(
+    model: type,
+    key: str,
+    value: Any,
+) -> tuple[Any, list["JoinSpec"]]:
+    """
+    Translate a Django-style filter kwarg into (SA clause, [JoinSpec]).
+
+    Example:
+        build_filter_clause(User, "profile__age__gte", 18)
+        → (Profile.age >= 18, [JoinSpec(Profile, ...)])
+    """
+    parts = key.split("__")
+
+    # Extract the trailing lookup suffix if present
+    if parts[-1] in ALL_LOOKUPS:
+        lookup = parts[-1]
+        field_path = "__".join(parts[:-1])
+    else:
+        lookup = "exact"
+        field_path = key
+
+    col, joins = resolve_path_with_joins(model, field_path)
+    clause = apply_lookup(col, lookup, value)
+    return clause, joins
+
+
+def build_loader_option(model: type, path: str, loader):
+
+    parts = path.split("__")
+    attr = getattr(model, parts[0])
+
+    option = loader(attr)
+
+    current = option
+    current_model = attr.property.mapper.class_
+    for part in parts[1:]:
+        rel_attr = getattr(current_model, part)
+        current = (
+            current.selectinload(rel_attr)
+            if loader is selectinload
+            else current.joinedload(rel_attr)
         )
-
-    return col_attr, joins
-
-
-def make_order_expr(model: type, token: str) -> UnaryExpression:
-    """
-    "-year"  → Model.year.desc()
-    "year"   → Model.year.asc()
-    "-generation__model__name" → (with join) related_col.desc()
-    """
-    desc = token.startswith("-")
-    field = token.lstrip("-")
-    path = field.split("__")
-    col_attr, _joins = resolve_column(model, path)
-    return col_attr.desc() if desc else col_attr.asc()
-
-
-def apply_group_by(model: type, statement: Select):  # noqa: F821
-    mapper = sa_inspect(model)
-    pk_cols = mapper.primary_key
-
-    for col in pk_cols:
-        stmt = statement.group_by(col)
-    return stmt
+        current_model = rel_attr.property.mapper.class_
+    return option

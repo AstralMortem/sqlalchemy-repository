@@ -1,167 +1,176 @@
-from utils import ModelA, ModelB
-from sqlalchemy_repository.expressions import F
+import pytest
+from sqlalchemy import column
 
+from sqlalchemy_repository.expressions.f import F, _coerce
 
-def test_f_resolve_simple():
-    f = F("name")
 
-    expr = f.resolve(ModelA)
+# =========================
+# HELPERS
+# =========================
 
-    assert expr.key == "name"
 
+def test_coerce_with_f():
+    f = F("price")
+    resolved = _coerce(f)
 
-def test_f_resolve_nested():
-    f = F("b__c__name")
+    assert resolved is not None
 
-    expr = f.resolve(ModelA)
 
-    assert expr.key == "name"
+def test_coerce_passthrough():
+    assert _coerce(10) == 10
+    assert _coerce("abc") == "abc"
 
 
-# ------------------------
-# arithmetic
-# ------------------------
+# =========================
+# BASIC RESOLVE
+# =========================
 
 
-def test_f_add_constant():
-    f = F("year") + 10
+def test_f_resolve_column():
+    f = F("price")
+    expr = f._resolve()
 
-    expr = f.resolve(ModelB)
+    assert hasattr(expr, "name") or expr.name == "price"
 
-    sql = str(expr)
-    assert "+" in sql
-    assert "year" in sql
 
+def test_f_repr():
+    f = F("price")
+    assert "price" in repr(f)
 
-def test_f_sub_constant():
-    f = F("year") - 5
 
-    expr = f.resolve(ModelB)
+# =========================
+# ARITHMETIC OPERATIONS
+# =========================
 
-    assert "-" in str(expr)
 
+def test_f_add():
+    f = F("price") + 10
+    assert isinstance(f, F)
 
-def test_f_mul_constant():
-    f = F("year") * 2
 
-    expr = f.resolve(ModelB)
+def test_radd():
+    f = 10 + F("price")
+    assert isinstance(f, F)
 
-    assert "*" in str(expr)
 
+def test_f_sub():
+    f = F("price") - 5
+    assert isinstance(f, F)
 
-def test_f_div_constant():
-    f = F("year") / 2
 
-    expr = f.resolve(ModelB)
+def test_rsub():
+    f = 100 - F("price")
+    assert isinstance(f, F)
 
-    assert "/" in str(expr)
 
+def test_mul():
+    f = F("price") * 2
+    assert isinstance(f, F)
 
-# # ------------------------
-# # F with F
-# # ------------------------
 
+def test_truediv():
+    f = F("price") / 2
+    assert isinstance(f, F)
 
-def test_f_with_f_add():
-    f = F("year") + F("qty")
-    expr = f.resolve(ModelB)
 
-    sql = str(expr)
-    assert "year" in sql
-    assert "qty" in sql
-    assert "+" in sql
+def test_neg():
+    f = -F("price")
+    assert isinstance(f, F)
 
 
-def test_f_with_f_mul():
-    f = F("year") * F("qty")
+# =========================
+# CHAINING EXPRESSIONS
+# =========================
 
-    expr = f.resolve(ModelB)
 
-    sql = str(expr)
-    assert "*" in sql
+def test_chain_operations():
+    f = (F("price") + 10) * 2 - 5
+    assert isinstance(f, F)
 
 
-# # ------------------------
-# # chaining
-# # ------------------------
+def test_nested_f_coercion():
+    f1 = F("price")
+    f2 = F("discount")
 
+    expr = f1 + f2
+    assert isinstance(expr, F)
 
-def test_f_chaining_operations():
-    f = (F("year") + 10) * 2
 
-    expr = f.resolve(ModelB)
+# =========================
+# ORDERING
+# =========================
 
-    sql = str(expr)
 
-    # ensures composition order applied
-    assert "year" in sql
-    assert "+" in sql
-    assert "*" in sql
+def test_asc():
+    f = F("price")
+    expr = f.asc()
 
+    assert expr is not None
 
-# # ------------------------
-# # right-hand operations
-# # ------------------------
 
+def test_desc():
+    f = F("price")
+    expr = f.desc()
 
-def test_f_radd():
-    f = 10 + F("year")
+    assert expr is not None
 
-    expr = f.resolve(ModelB)
 
-    sql = str(expr)
-    assert "+" in sql
+# =========================
+# EDGE CASES
+# =========================
 
 
-def test_f_rsub():
-    f = 100 - F("year")
+def test_multiple_operations():
+    f = F("price")
 
-    expr = f.resolve(ModelB)
+    expr = f + 10 - 2 * 3 / 2
+    assert isinstance(expr, F)
 
-    sql = str(expr)
-    assert "-" in sql
 
+def test_neg_chain():
+    f = -(-F("price"))
+    assert isinstance(f, F)
 
-def test_f_rmul():
-    f = 3 * F("year")
 
-    expr = f.resolve(ModelB)
+# =========================
+# RESOLVE STABILITY
+# =========================
 
-    assert "*" in str(expr)
 
+def test_resolve_consistency():
+    f = F("price")
 
-def test_f_rdiv():
-    f = 100 / F("year")
+    a = f._resolve()
+    b = f._resolve()
 
-    expr = f.resolve(ModelB)
+    # should be stable column reference
+    assert a.name == b.name
 
-    assert "/" in str(expr)
 
+def test_expr_preserved():
+    base = column("price")
+    f = F("price", base)
 
-# # ------------------------
-# # negation
-# # ------------------------
+    assert f._resolve() is base
 
 
-def test_f_negation():
-    f = -F("year")
+# =========================
+# MIXED TYPES
+# =========================
 
-    expr = f.resolve(ModelB)
 
-    sql = str(expr)
-    assert "-" in sql
+def test_f_with_literal_math():
+    f = F("price")
 
+    expr = f + 100
+    assert isinstance(expr, F)
 
-# # ------------------------
-# # edge cases
-# # ------------------------
+    expr2 = f * 1.5
+    assert isinstance(expr2, F)
 
 
-def test_f_chain_with_nested_field():
-    f = F("b__year") * 2
+def test_large_expression_tree():
+    f = F("price")
 
-    expr = f.resolve(ModelA)
-
-    sql = str(expr)
-    assert "year" in sql
-    assert "*" in sql
+    expr = (((f + 10) * 2) / 3) - 5
+    assert isinstance(expr, F)

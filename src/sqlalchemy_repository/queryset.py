@@ -1,12 +1,25 @@
-from sqlalchemy import Select, func, select
-from .types import ModelT, FilterExpr
-from .expressions import F, Q
+from collections import defaultdict
+import copy
+import logging
+from sqlalchemy import func, not_, select
+from .types import ModelT
+from typing import Any, AsyncIterator, Generic, Self
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, subqueryload, selectinload
-from typing import Any, Generic
-from .utils.columns import make_order_expr, apply_group_by
-from .utils.relations import build_loader_tree
-from .aggregations import Aggregate
+from sqlalchemy.orm import joinedload, selectinload
+from .expressions import Q, F
+from .expressions.aggregations import Aggregate, group_aggregates
+from .utils.joins import JoinCollector
+from .utils.columns import (
+    build_filter_clause,
+    build_loader_option,
+    resolve_column,
+    resolve_pk_column,
+    resolve_pk_fields,
+    resolve_pk_name,
+    resolve_path_with_joins,
+)
+
+log = logging.getLogger(__name__)
 
 
 class QuerySet(Generic[ModelT]):
@@ -15,239 +28,356 @@ class QuerySet(Generic[ModelT]):
         model: type[ModelT],
         session: AsyncSession,
         *,
-        _stmt: Select | None = None,
-        _joins: list[tuple[Any, Any]] | None = None,
-        _loader_opts: list[Any] | None = None,
-        _result_cache: list[ModelT] | None = None,
+        _copy_from: "QuerySet[ModelT] | None" = None,
     ):
         self._model = model
         self._session = session
-        self._stmt = _stmt if _stmt is not None else select(model)
-        self._joins = _joins or []
-        self._loader_opts = _loader_opts or []
-        self._result_cache = _result_cache or []
-        self._annotations = {}
+        self._filters: list[Any] = []
+        self._excludes: list[Any] = []
+        self._joins: JoinCollector = JoinCollector()
+        self._order_fields: list[Any] = []
+        self._annotations: dict[str, Any] = {}
+        self._select_related: list[str] = []
+        self._prefetch: list[str] = []
+        self._limit_val: int | None = None
+        self._offset_val: int | None = None
+        self._distinct_on: bool = False
+        self._values_fields: list[str] | None = None
+        self._values_list_fields: list[str] | None = None
+        self._values_list_flat: bool = False
+        self._debug: bool = False
 
-    def _clone(self, **kw):
-        clone = QuerySet.__new__(QuerySet)
-        clone._model = self._model
-        clone._session = self._session
-        clone._stmt = kw.get("_stmt", self._stmt)
-        clone._joins = kw.get("_joins", self._joins)
-        clone._loader_opts = kw.get("_loader_opts", self._loader_opts)
-        clone._result_cache = None
-        clone._annotations = kw.get("_annotations", self._annotations)
-        return clone
+        if _copy_from is not None:
+            self._copy(_copy_from)
 
-    def _add_joins(self, *joins: list[tuple[Any, Any]]):
-        existing = {id(j[1]) for j in self._joins}
-        new_joins = list(self._joins)
-        for pair in joins:
-            if id(pair[1]) not in existing:
-                new_joins.append(pair)
-                existing.add(id(pair[1]))
-        return self._clone(_joins=new_joins)
+    def _copy(self, source: "QuerySet[ModelT]"):
+        self._model = source._model
+        self._session = source._session
+        self._filters = list(source._filters)
+        self._excludes = list(source._excludes)
+        self._joins = copy.deepcopy(source._joins)
+        self._order_fields = list(source._order_fields)
+        self._annotations = dict(source._annotations)
+        self._select_related = list(source._select_related)
+        self._prefetch = list(source._prefetch)
+        self._limit_val = source._limit_val
+        self._offset_val = source._offset_val
+        self._distinct_on = source._distinct_on
+        self._values_fields = source._values_fields
+        self._values_list_fields = source._values_list_fields
+        self._values_list_flat = source._values_list_flat
+        self._debug = source._debug
 
-    def _build_stmt(self):
-        stmt = self._stmt
-        for _parent, rel_attr in self._joins:
-            stmt = stmt.join(rel_attr, isouter=True)
-        for opt in self._loader_opts:
-            stmt = stmt.options(opt)
+    def _clone(self) -> "QuerySet[ModelT]":
+        return QuerySet(self._model, self._session, _copy_from=self)
 
-        if self._joins:
+    def _add_filters_from_kw(
+        self, kw: dict[str, Any], qs: "QuerySet[ModelT]", negate: bool = False
+    ):
+        for k, v in kw.items():
+            clause, joins = build_filter_clause(self._model, k, v)
+            for j in joins:
+                qs._joins.add(j)
+            if negate:
+                clause = not_(clause)
+            qs._filters.append(clause)
+        return qs
+
+    def _add_q_obj(
+        self, q_objs: tuple["Q", ...], qs: "QuerySet[ModelT]", negate: bool = False
+    ):
+        for q in q_objs:
+            if negate:
+                q = ~q
+            clause = q.resolve(self._model, qs._joins)
+            qs._filters.append(clause)
+        return qs
+
+    def _build_select(self):
+        if self._annotations:
+            annotation_exprs = {
+                alias: (
+                    agg.resolve(self._model)
+                    if isinstance(agg, Aggregate)
+                    else agg._resolve()
+                    if isinstance(agg, F)
+                    else agg
+                )
+                for alias, agg in self._annotations.items()
+            }
+            stmt = select(
+                self._model,
+                *[expr.label(alias) for alias, expr in annotation_exprs.items()],
+            )
+        else:
+            stmt = select(self._model)
+
+        # Joins
+        for spec in self._joins.joins:
+            stmt = stmt.join(spec.target_model, spec.on_clause, isouter=spec.isouter)
+
+        # Filters
+        for clause in self._filters:
+            stmt = stmt.where(clause)
+        for clause in self._excludes:
+            stmt = stmt.where(clause)
+
+        # Group By
+        if self._annotations:
+            pks = resolve_pk_fields(self._model)
+            stmt = stmt.group_by(*pks)
+
+        # Order by
+        for order_field in self._order_fields:
+            stmt = stmt.order_by(self._parse_order_field(order_field))
+
+        # Distinct
+        if self._distinct_on:
             stmt = stmt.distinct()
+
+        # Limit/Offset
+        if self._limit_val is not None:
+            stmt = stmt.limit(self._limit_val)
+
+        if self._offset_val is not None:
+            stmt = stmt.offset(self._offset_val)
+
+        # Relation loading
+        options = []
+        for path in self._select_related:
+            options.append(build_loader_option(self._model, path, joinedload))
+
+        for path in self._prefetch:
+            options.append(build_loader_option(self._model, path, selectinload))
+
+        if options:
+            stmt = stmt.options(*options)
+
         return stmt
 
-    def filter(self, *args: FilterExpr, **kwargs: Any) -> "QuerySet[ModelT]":
-        collected_joins: list[tuple[Any, Any]] = []
-        clauses = []
-        for arg in args:
-            if isinstance(arg, Q):
-                clauses.append(arg.resolve(self._model, collected_joins))
-            else:
-                clauses.append(arg)
-        if kwargs:
-            clauses.append(Q(**kwargs).resolve(self._model, collected_joins))
-        qs = self._add_joins(*collected_joins)
-        qs._stmt = qs._stmt.where(*clauses)
-        return qs
+    def _parse_order_field(self, field: str):
+        if isinstance(field, F):
+            return field._resolve()
 
-    def exclude(self, *args: FilterExpr, **kwargs: Any) -> "QuerySet[ModelT]":
-        collected_joins: list[tuple[Any, Any]] = []
-        clauses = []
-        for arg in args:
-            if isinstance(arg, Q):
-                clauses.append((~arg).resolve(self._model, collected_joins))
-            else:
-                from sqlalchemy import not_
+        if field.startswith("-"):
+            col = resolve_column(self._model, field[1:])
+            return col.desc()
 
-                clauses.append(not_(arg))
-        if kwargs:
-            clauses.append((~Q(**kwargs)).resolve(self._model, collected_joins))
-        qs = self._add_joins(*collected_joins)
-        qs._stmt = qs._stmt.where(*clauses)
-        return qs
+        col = resolve_column(self._model, field)
+        return col.asc()
 
-    def order_by(self, *fields: str | Any) -> "QuerySet[ModelT]":
-        exprs = []
-
-        for f in fields:
-            if isinstance(f, str):
-                desc = f.startswith("-")
-                name = f.lstrip("-")
-
-                if name in self._annotations:
-                    col = self._annotations[name]
-                    exprs.append(col.desc() if desc else col.asc())
-                else:
-                    exprs.append(make_order_expr(self._model, f))
-            else:
-                exprs.append(f)
+    def filter(self, *q: Q, **kw) -> Self:
         qs = self._clone()
-        qs._stmt = qs._stmt.order_by(*exprs)
-        qs._annotations = self._annotations
+        qs = self._add_q_obj(q, qs)
+        qs = self._add_filters_from_kw(kw, qs)
         return qs
 
-    def limit(self, n: int) -> "QuerySet[ModelT]":
+    def exclude(self, *q: Q, **kw) -> Self:
         qs = self._clone()
-        qs._stmt = qs._stmt.limit(n)
+        qs = self._add_q_obj(q, qs, negate=True)
+        qs = self._add_filters_from_kw(kw, qs, negate=True)
         return qs
 
-    def offset(self, n: int) -> "QuerySet[ModelT]":
+    def order_by(self, *fields: str | F) -> Self:
         qs = self._clone()
-        qs._stmt = qs._stmt.offset(n)
+        qs._order_fields = list(fields)
         return qs
 
-    def select_related(
-        self, *paths: str, strategy: str = "joined"
-    ) -> "QuerySet[ModelT]":
-        fns = {
-            "joined": (joinedload, lambda p, a: p.joinedload(a)),
-            "subquery": (subqueryload, lambda p, a: p.subqueryload(a)),
-            "selectin": (selectinload, lambda p, a: p.selectinload(a)),
-        }
-
-        loader_fn, chained_fn = fns.get(strategy, fns["joined"])
-        opts = build_loader_tree(self._model, paths, loader_fn, chained_fn)
+    def distinct(self) -> Self:
         qs = self._clone()
-        qs._loader_opts = list(self._loader_opts) + opts
+        qs._distinct_on = True
         return qs
 
-    def prefetch_related(self, *paths) -> "QuerySet[ModelT]":
-        return self.select_related(*paths, strategy="selectin")
-
-    def only(self, *fields: str) -> "QuerySet[ModelT]":
-        from sqlalchemy.orm import load_only
-
-        attrs = [getattr(self._model, f) for f in fields]
+    def limit(self, n: int) -> Self:
         qs = self._clone()
-        qs._stmt = qs._stmt.options(load_only(*attrs))
+        qs._limit_val = n
         return qs
 
-    def annotate(self, **kwargs: Any) -> "QuerySet[ModelT]":
+    def offset(self, n: int) -> Self:
         qs = self._clone()
-
-        collected_joins: list[tuple[Any, Any]] = []
-        add_cols = []
-
-        for alias, expr in kwargs.items():
-            if isinstance(expr, Aggregate):
-                col_expr = expr.resolve(self._model, collected_joins)
-            elif isinstance(expr, F):
-                col_expr = expr.resolve(self._model)
-            else:
-                col_expr = expr
-            labeled = col_expr.label(alias)
-            self._annotations[alias] = labeled
-            add_cols.append(labeled)
-
-        qs = self._add_joins(*collected_joins)
-        qs._stmt = qs._stmt.add_columns(*add_cols)
-
+        qs._offset_val = n
         return qs
 
-    # Main methods
+    def annotate(self, **kw: Aggregate | F | Any) -> Self:
+        qs = self._clone()
+        qs._annotations = {**qs._annotations, **kw}
+        return qs
 
-    async def execute(self):
-        result = await self._session.execute(self._build_stmt())
-        return result.all()
+    def values(self, *fields: str) -> Self:
+        qs = self._clone()
+        qs._values_fields = list(fields)
+        return qs
+
+    def values_list(self, *fields: str, flat: bool = False):
+        qs = self._clone()
+        qs._values_list_fields = list(fields)
+        qs._values_list_flat = flat
+        return qs
+
+    def select_related(self, *fields: str) -> Self:
+        qs = self._clone()
+        qs._select_related = list(fields)
+        return qs
+
+    def prefetch_related(self, *fields: str) -> Self:
+        qs = self._clone()
+        qs._prefetch = list(fields)
+        return qs
+
+    def debug(self) -> Self:
+        qs = self._clone()
+        qs._debug = True
+        return qs
+
+    # Execution
+    async def _execute(self):
+        stmt = self._build_select()
+        if self._debug:
+            log.debug("QuerySet SQL:\n%s", stmt)
+        return await self._session.execute(stmt)
+
+    async def _execute_with_aggregation(self):
+        # Run without annotations
+        base_qs = self._clone()
+        base_qs._annotations = {}
+
+        instances = await base_qs.all()
+        if not instances:
+            return []
+
+        pk_name = resolve_pk_name(self._model)
+        ids = [getattr(i, pk_name) for i in instances]
+        grouped = group_aggregates(self._annotations)
+
+        # Process each aggregations
+        for path, aggs in grouped.items():
+            result_map = await self._run_aggregation_group(ids, path, aggs)
+            for obj in instances:
+                obj_id = getattr(obj, pk_name)
+                values = result_map.get(obj_id, {})
+                for alias, _ in aggs:
+                    setattr(obj, alias, values.get(alias))
+        return instances
+
+    async def _run_aggregation_group(
+        self, ids, path: str, aggs: list[tuple[str, Aggregate]]
+    ):
+        _, joins = resolve_path_with_joins(self._model, path)
+
+        parent_pk = resolve_pk_column(self._model)
+
+        # Start from root model
+        stmt = select(parent_pk.label("parent_id"))
+
+        for spec in joins:
+            stmt = stmt.join(spec.target_model, spec.on_clause, isouter=spec.isouter)
+
+        for alias, agg in aggs:
+            col_expr = agg.resolve(self._model)
+            stmt = stmt.add_columns(col_expr.label(alias))
+
+        stmt = stmt.where(parent_pk.in_(ids))
+        stmt = stmt.group_by(parent_pk)
+        result = await self._session.execute(stmt)
+
+        output = defaultdict(dict)
+        for row in result:
+            pid = row.parent_id
+            for alias, _ in aggs:
+                output[pid][alias] = getattr(row, alias)
+        return output
 
     async def all(self) -> list[ModelT]:
-        result = await self._session.execute(self._build_stmt())
-
-        if not getattr(self, "_annotations", None):
-            return list(result.scalars().unique().all())
-
-        rows = result.all()
-        objects = []
-        for row in rows:
-            obj = row[0]
-            for i, alias in enumerate(self._annotations.keys(), start=1):
-                setattr(obj, alias, row[i])
-            objects.append(obj)
-
-        return objects
+        if self._annotations and any(
+            isinstance(v, Aggregate) for v in self._annotations.values()
+        ):
+            return await self._execute_with_aggregation()
+        result = await self._execute()
+        return result.scalars().all()
 
     async def first(self) -> ModelT | None:
-        stmt = self._build_stmt().limit(1)
+        stmt = self._build_select().limit(1)
+        if self._debug:
+            log.debug("QuerySet SQL (first):\n%s", stmt)
         result = await self._session.execute(stmt)
-        if not getattr(self, "_annotations", None):
-            return result.scalar_one_or_none()
-
-        row = result.one_or_none()
-        if row is not None:
-            obj = row[0]
-            for i, alias in enumerate(self._annotations.keys(), start=1):
-                setattr(obj, alias, row[i])
-            return obj
-        return None
+        return result.scalars().first()
 
     async def last(self) -> ModelT | None:
-        pk_col = list(self._model.__table__.primary_key.columns)[0]
-        qs = self.order_by(f"-{pk_col.name}").limit(1)
-        result = await self._session.execute(qs._build_stmt())
-        return result.scalar_one_or_none()
+        qs = self._clone()
+        if qs._order_fields:
+            reversed_fields = []
+            for f in qs._order_fields:
+                if isinstance(f, str):
+                    if f.startswith("-"):
+                        reversed_fields.append(f[1:])
+                    else:
+                        reversed_fields.append(f"-{f}")
+                else:
+                    reversed_fields.append(f)
+            qs._order_fields = reversed_fields
+        else:
+            # Fallback to pk
+            pk_col = resolve_pk_name(self._model)
+            qs._order_fields = [f"-{pk_col}"]
+
+        return await qs.first()
+
+    async def get(self, **kw) -> ModelT:
+        qs = self.filter(**kw)
+        result = await qs.limit(2).all()
+        if not result:
+            raise ValueError(f"{self._model.__name__} mathing query does not exist")
+        if len(result) > 1:
+            raise ValueError(f"get() returned more than onre {self._model.__name__}")
+        return result[0]
 
     async def count(self) -> int:
-        subq = self._build_stmt().order_by(None).subquery()
-        stmt = select(func.count()).select_from(subq)
+        stmt = select(func.count()).select_from(self._build_select().subquery())
+        if self._debug:
+            log.debug(f"QuerySet SQL (count):\n%s", stmt)
         result = await self._session.execute(stmt)
-        return result.scalar() or 0
+        return result.scalar_one() or 0
 
-    async def exist(self) -> bool:
+    async def exists(self) -> bool:
+        from sqlalchemy import literal
 
-        from sqlalchemy import exists as sa_exists
-
-        subq = self._build_stmt().limit(1)
-        stmt = select(sa_exists(subq))
+        stmt = select(literal(1)).select_from(self._build_select().limit(1).subquery())
+        if self._debug:
+            log.debug(f"QuerySet SQL (exists):\n%s", stmt)
         result = await self._session.execute(stmt)
-        return bool(result.scalar())
+        return result.first() is not None
 
-    async def paginate(self, page: int, page_size: int) -> tuple[list[ModelT], int]:
+    async def paginate(self, page: int, size: int) -> tuple[list[ModelT], int]:
         total = await self.count()
-        items = await self.offset((page - 1) * page_size).limit(page_size).all()
+        items = await self.offset((page - 1) * size).limit(size).all()
         return items, total
 
-    async def aggregate(self, **kwargs) -> dict[str, Any]:
-        collected_joins: list[tuple[Any, Any]] = []
-        cols = []
+    async def explain(self) -> str:
+        from sqlalchemy import text
 
-        for _, expr in kwargs.items():
-            if isinstance(expr, Aggregate):
-                col = expr.resolve(self._model, collected_joins)
-            else:
-                col = expr
-            cols.append(col)
+        stmt = self._build_select()
+        compiled = stmt.compile(
+            dialect=self._session.get_bind().dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+        explain_stmt = text(f"EXPLAIN {compiled}")
+        result = await self._session.execute(explain_stmt)
+        return "\n".join(row[0] for row in result)
 
-        qs = self._add_joins(*collected_joins)
-        stmt = qs._build_stmt().with_only_columns(*cols).order_by(None)
+    def __aiter__(self) -> AsyncIterator[ModelT]:
+        return self._async_iter()
 
-        row = (await self._session.execute(stmt)).one()
-        return dict(zip(kwargs.keys(), row))
+    async def _async_iter(self) -> AsyncIterator[ModelT]:
+        result = await self.all()
+        for obj in result:
+            yield obj
 
-    def __repr__(self):
-        return f"<QuerySet model={self._model.__name__}>"
+    def __await__(self):
+        return self.all().__await__()
 
-    def compile(self):
-        return self._stmt.compile(compile_kwargs={"literal_binds": True})
+    def __repr__(self) -> str:
+        return (
+            f"<QuerySet model={self._model.__name__} "
+            f"filters={len(self._filters)} "
+            f"annotations={list(self._annotations.keys())}"
+        )

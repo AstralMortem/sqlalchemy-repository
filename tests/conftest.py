@@ -1,12 +1,17 @@
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from utils import Base, ModelB, ModelA, ModelC
+from utils import Base, User, Profile, Post, Comment
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+import pytest
 import pytest_asyncio
 
 
-@pytest_asyncio.fixture()
-async def engine():
-    engine = create_async_engine("sqlite+aiosqlite://")
+# =========================
+# FIXTURES
+# =========================
 
+
+@pytest_asyncio.fixture
+async def engine():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
@@ -14,28 +19,38 @@ async def engine():
         await conn.run_sync(Base.metadata.drop_all)
 
 
-@pytest_asyncio.fixture()
+@pytest_asyncio.fixture
 async def session(engine):
-    LocalSession = async_sessionmaker(engine, expire_on_commit=False)
-    async with LocalSession() as session:
+    async_session = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with async_session() as session:
         yield session
 
 
 @pytest_asyncio.fixture
-async def init_models(session):
-    c1 = ModelC(name="c1")
-    c2 = ModelC(name="c2")
+async def data(session: AsyncSession):
+    u1 = User(name="Alice")
+    u2 = User(name="Bob")
 
-    b1 = ModelB(year=2004, qty=1, c=c1)
-    b2 = ModelB(year=2005, qty=2, c=c1)
-    b3 = ModelB(year=2006, qty=3, c=c2)
+    p1 = Profile(age=25, user=u1)
+    p2 = Profile(age=30, user=u2)
 
-    a1 = ModelA(name="a1", b=b1)
-    a2 = ModelA(name="a2", b=b2)
+    post1 = Post(title="A", rating=4.5, author=u1)
+    post2 = Post(title="B", rating=3.0, author=u1)
+    post3 = Post(title="C", rating=5.0, author=u2)
 
-    session.add_all([c1, c2, b1, b2, b3, a1, a2])
+    comments = [
+        Comment(text="c1", post=post1),
+        Comment(text="c2", post=post1),
+        Comment(text="c3", post=post2),
+    ]
 
-    await session.flush()
+    session.add_all([u1, u2])
     await session.commit()
 
-    return {"a": [a1, a2], "b": [b1, b2, b3], "c": [c1, c2]}
+    return {
+        "users": [u1, u2],
+        "posts": [post1, post2, post3],
+    }
