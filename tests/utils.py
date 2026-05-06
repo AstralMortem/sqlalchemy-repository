@@ -24,6 +24,7 @@ class Profile(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
 
     user: Mapped[User] = relationship(back_populates="profile")
+    comments: Mapped[list["Comment"]] = relationship(back_populates="profile")
 
 
 class Post(Base):
@@ -44,5 +45,8 @@ class Comment(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     text: Mapped[str]
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
+    profile_id: Mapped[int] = mapped_column(ForeignKey("profiles.id"))
+    rating: Mapped[int]
 
+    profile: Mapped[Profile] = relationship(back_populates="comments")
     post: Mapped[Post] = relationship(back_populates="comments")

@@ -31,26 +31,30 @@ async def session(engine):
 
 @pytest_asyncio.fixture
 async def data(session: AsyncSession):
-    u1 = User(name="Alice")
-    u2 = User(name="Bob")
+    u1 = User(name="Alice",id=1)
+    u2 = User(name="Bob", id=2)
+    u3 = User(name="Carol",id=3)
 
     p1 = Profile(age=25, user=u1)
     p2 = Profile(age=30, user=u2)
+    p3 = Profile(age=22, user=u3)
 
-    post1 = Post(title="A", rating=4.5, author=u1)
-    post2 = Post(title="B", rating=3.0, author=u1)
-    post3 = Post(title="C", rating=5.0, author=u2)
+    post1 = Post(title="A", rating=4.0, author=u1, id=1)
+    post2 = Post(title="B", rating=5.0, author=u1, id=2)
+    post3 = Post(title="C", rating=1.0, author=u2, id=3)
+    post4 = Post(title="D", rating=2.0, author=u2, id=4)
+    post5 = Post(title="E", rating=3.0, author=u2, id=5)
 
     comments = [
-        Comment(text="c1", post=post1),
-        Comment(text="c2", post=post1),
-        Comment(text="c3", post=post2),
+        Comment(text="c1", post=post1, profile=p2, rating=4),
+        Comment(text="c2", post=post1, profile=p3, rating=3),
+        Comment(text="c3", post=post2, profile=p2, rating=2),
     ]
 
-    session.add_all([u1, u2])
+    session.add_all([u1, u2, u3])
     await session.commit()
 
     return {
-        "users": [u1, u2],
-        "posts": [post1, post2, post3],
+        "users": [u1, u2, u3],
+        "posts": [post1, post2, post3, post4, post5],
     }

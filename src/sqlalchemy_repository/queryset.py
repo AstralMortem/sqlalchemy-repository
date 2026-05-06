@@ -339,7 +339,11 @@ class QuerySet(Generic[ModelT]):
         return result[0]
 
     async def count(self) -> int:
-        stmt = select(func.count()).select_from(self._build_select().subquery())
+        qs = self._clone()
+        qs._annotations = {}
+        query = qs._build_select().subquery()
+
+        stmt = select(func.count()).select_from(query)
         if self._debug:
             log.debug(f"QuerySet SQL (count):\n%s", stmt)
         result = await self._session.execute(stmt)
@@ -347,8 +351,11 @@ class QuerySet(Generic[ModelT]):
 
     async def exists(self) -> bool:
         from sqlalchemy import literal
+        qs = self._clone()
+        qs._annotations = {}
+        query = qs._build_select().subquery()
 
-        stmt = select(literal(1)).select_from(self._build_select().limit(1).subquery())
+        stmt = select(literal(1)).select_from(query)
         if self._debug:
             log.debug(f"QuerySet SQL (exists):\n%s", stmt)
         result = await self._session.execute(stmt)
@@ -361,8 +368,9 @@ class QuerySet(Generic[ModelT]):
 
     async def explain(self) -> str:
         from sqlalchemy import text
-
-        stmt = self._build_select()
+        qs = self._clone()
+        qs._annotations = {}
+        stmt = qs._build_select()
         compiled = stmt.compile(
             dialect=self._session.get_bind().dialect,
             compile_kwargs={"literal_binds": True},
