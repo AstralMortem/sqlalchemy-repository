@@ -96,6 +96,4 @@ def apply_lookup(column: Column, lookup: str, value: Any) -> ClauseElement:
 
             return extract("day", column) == value
         case _:
-            raise ValueError(
-                f"Unknown lookup '{lookup}'. Available: {sorted(ALL_LOOKUPS)}"
-            )
+            raise ValueError(f"Unknown lookup '{lookup}'. Available: {sorted(ALL_LOOKUPS)}")

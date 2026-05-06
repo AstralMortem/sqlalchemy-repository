@@ -21,9 +21,7 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def session(engine):
-    async_session = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
+    async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as session:
         yield session
@@ -31,9 +29,9 @@ async def session(engine):
 
 @pytest_asyncio.fixture
 async def data(session: AsyncSession):
-    u1 = User(name="Alice",id=1)
+    u1 = User(name="Alice", id=1)
     u2 = User(name="Bob", id=2)
-    u3 = User(name="Carol",id=3)
+    u3 = User(name="Carol", id=3)
 
     p1 = Profile(age=25, user=u1)
     p2 = Profile(age=30, user=u2)

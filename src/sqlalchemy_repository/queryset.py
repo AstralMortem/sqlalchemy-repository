@@ -83,9 +83,7 @@ class QuerySet(Generic[ModelT]):
             qs._filters.append(clause)
         return qs
 
-    def _add_q_obj(
-        self, q_objs: tuple["Q", ...], qs: "QuerySet[ModelT]", negate: bool = False
-    ):
+    def _add_q_obj(self, q_objs: tuple["Q", ...], qs: "QuerySet[ModelT]", negate: bool = False):
         for q in q_objs:
             if negate:
                 q = ~q
@@ -260,9 +258,7 @@ class QuerySet(Generic[ModelT]):
                     setattr(obj, alias, values.get(alias))
         return instances
 
-    async def _run_aggregation_group(
-        self, ids, path: str, aggs: list[tuple[str, Aggregate]]
-    ):
+    async def _run_aggregation_group(self, ids, path: str, aggs: list[tuple[str, Aggregate]]):
         _, joins = resolve_path_with_joins(self._model, path)
 
         parent_pk = resolve_pk_column(self._model)
@@ -287,10 +283,12 @@ class QuerySet(Generic[ModelT]):
             for alias, _ in aggs:
                 output[pid][alias] = getattr(row, alias)
         return output
-    
+
     def _is_annotated(self) -> bool:
-        return self._annotations and any(isinstance(v, Aggregate) for v in self._annotations.values())
-    
+        return self._annotations and any(
+            isinstance(v, Aggregate) for v in self._annotations.values()
+        )
+
     async def all(self) -> list[ModelT]:
         if self._is_annotated():
             return await self._execute_with_aggregation()
@@ -308,7 +306,7 @@ class QuerySet(Generic[ModelT]):
             log.debug("QuerySet SQL (first):\n%s", stmt)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
-    
+
     async def last(self) -> ModelT | None:
         qs = self._clone()
         if qs._order_fields:
@@ -351,6 +349,7 @@ class QuerySet(Generic[ModelT]):
 
     async def exists(self) -> bool:
         from sqlalchemy import literal
+
         qs = self._clone()
         qs._annotations = {}
         query = qs._build_select().subquery()
@@ -368,6 +367,7 @@ class QuerySet(Generic[ModelT]):
 
     async def explain(self) -> str:
         from sqlalchemy import text
+
         qs = self._clone()
         qs._annotations = {}
         stmt = qs._build_select()
