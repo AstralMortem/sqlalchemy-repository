@@ -1,7 +1,7 @@
 from collections import defaultdict
 import copy
 import logging
-from sqlalchemy import func, not_, select
+from sqlalchemy import func, literal_column, not_, select
 from .types import ModelT
 from typing import Any, AsyncIterator, Generic, Self
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from .utils.columns import (
     resolve_pk_fields,
     resolve_pk_name,
     resolve_path_with_joins,
+    resolve_traversal_field,
 )
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,26 @@ class QuerySet(Generic[ModelT]):
             qs._filters.append(clause)
         return qs
 
+    def _resolve_columns_mode(self, fields: list[str]):
+        col_exprs = []
+        group_cols = []
+        extra_joins = []
+
+        for f in fields:
+            traversal = resolve_traversal_field(self._model, f)
+            if traversal is not None:
+                col_exprs.append(traversal.col_expr)
+                group_cols.append(traversal.group_col)
+                if traversal.join_spec is not None:
+                    already = {j.target_model for j in extra_joins}
+                    if traversal.join_spec.target_model not in already:
+                        extra_joins.append(traversal.join_spec)
+            else:
+                raw = resolve_column(self._model, f)
+                col_exprs.append(raw.label(f))
+                group_cols.append(raw)
+        return col_exprs, group_cols, extra_joins
+
     def _build_select(self):
         annotation_exprs: dict[str, Any] = {}
         if self._annotations:
@@ -104,15 +125,16 @@ class QuerySet(Generic[ModelT]):
                 )
                 for alias, agg in self._annotations.items()
             }
-            
 
         columns_mode = self._values_fields or self._values_list_fields
+        extra_joins = []
+        group_cols = []
 
         if columns_mode:
-            col_exprs = [
-                resolve_column(self._model, f).label(f) for f in columns_mode
-            ]
-            stmt = select(*col_exprs, *[expr.label(alias) for alias, expr in annotation_exprs.items()])
+            col_exprs, group_cols, extra_joins = self._resolve_columns_mode(columns_mode)
+            stmt = select(
+                *col_exprs, *[expr.label(alias) for alias, expr in annotation_exprs.items()]
+            ).select_from(self._model)
         elif annotation_exprs:
             stmt = select(
                 self._model,
@@ -122,8 +144,15 @@ class QuerySet(Generic[ModelT]):
             stmt = select(self._model)
 
         # Joins
+        seen_join_target = set()
         for spec in self._joins.joins:
-            stmt = stmt.join(spec.target_model, spec.on_clause, isouter=spec.isouter)
+            if spec.target_model not in seen_join_target:
+                stmt = stmt.join(spec.target_model, spec.on_clause, isouter=spec.isouter)
+                seen_join_target.add(spec.target_model)
+        for spec in extra_joins:
+            if spec.target_model not in seen_join_target:
+                stmt = stmt.join(spec.target_model, spec.on_clause, isouter=spec.isouter)
+                seen_join_target.add(spec.target_model)
 
         # Filters
         for clause in self._filters:
@@ -134,11 +163,12 @@ class QuerySet(Generic[ModelT]):
         # Group By
         if annotation_exprs:
             if columns_mode:
-                non_agg_cols = [
-                    resolve_column(self._model, f) for f in columns_mode if f not in annotation_exprs
+                agg_aliases = set(annotation_exprs.keys())
+                non_agg_group_cols = [
+                    gc for f, gc in zip(columns_mode, group_cols) if f not in agg_aliases
                 ]
-                if non_agg_cols:
-                    stmt = stmt.group_by(*non_agg_cols)
+                if non_agg_group_cols:
+                    stmt = stmt.group_by(*non_agg_group_cols)
             else:
                 pks = resolve_pk_fields(self._model)
                 stmt = stmt.group_by(*pks)
@@ -171,7 +201,7 @@ class QuerySet(Generic[ModelT]):
                 stmt = stmt.options(*options)
 
         return stmt
-    
+
     def _extract_results(self, result) -> list[Any]:
         """Turn a raw execute() result into the right Python type."""
         if self._values_fields:
@@ -180,9 +210,7 @@ class QuerySet(Generic[ModelT]):
         if self._values_list_fields:
             if self._values_list_flat:
                 if len(self._values_list_fields) != 1:
-                    raise ValueError(
-                        "flat=True requires exactly one field in values_list()"
-                    )
+                    raise ValueError("flat=True requires exactly one field in values_list()")
                 return [row[0] for row in result]
             return [tuple(row) for row in result]
 
@@ -192,12 +220,21 @@ class QuerySet(Generic[ModelT]):
         if isinstance(field, F):
             return field._resolve()
 
-        if field.startswith("-"):
-            col = resolve_column(self._model, field[1:])
-            return col.desc()
+        desc = field.startswith("-")
+        name = field[1:] if desc else field
 
-        col = resolve_column(self._model, field)
-        return col.asc()
+        # If annotated
+        if name in self._annotations:
+            expr = literal_column(name)
+            return expr.desc() if desc else expr.asc()
+        # If traversal
+        traversal = resolve_traversal_field(self._model, name)
+        if traversal is not None:
+            return traversal.group_col.desc() if desc else traversal.group_col.asc()
+
+        # If plain
+        col = resolve_column(self._model, name)
+        return col.desc() if desc else col.asc()
 
     def filter(self, *q: Q, **kw) -> Self:
         qs = self._clone()
@@ -323,7 +360,7 @@ class QuerySet(Generic[ModelT]):
         return self._annotations and any(
             isinstance(v, Aggregate) for v in self._annotations.values()
         )
-    
+
     def _is_columns_mode(self) -> bool:
         return self._values_fields or self._values_list_fields
 
@@ -403,11 +440,11 @@ class QuerySet(Generic[ModelT]):
         total = await self.count()
         items = await self.offset((page - 1) * size).limit(size).all()
         return items, total
-    
+
     async def aggregate(self, **kw: Aggregate | F | Any):
         if not kw:
             return {}
-        
+
         base_qs = self._clone()
         base_qs._annotations = {}
         base_qs._values_fields = None
@@ -431,8 +468,6 @@ class QuerySet(Generic[ModelT]):
 
         stmt = select(*agg_cols).select_from(subq)
 
-        print(stmt.compile(compile_kwargs={"literal_bindings": True}))
-
         if self._debug:
             log.debug("QuerySet SQL (aggregate):\n%s", stmt)
 
@@ -441,7 +476,6 @@ class QuerySet(Generic[ModelT]):
         if row is None:
             return {alias: None for alias in kw}
         return dict(row._mapping)
-
 
     async def explain(self) -> str:
         from sqlalchemy import text

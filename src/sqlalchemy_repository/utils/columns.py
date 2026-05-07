@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import RelationshipProperty, selectinload
@@ -148,3 +149,48 @@ def build_loader_option(model: type, path: str, loader):
     return option
 
 
+@dataclass
+class TraversalColumn:
+    col_expr: Any
+    join_spec: JoinSpec | None
+    group_col: Any
+
+
+def resolve_traversal_field(model: type, path: str) -> "TraversalColumn | None":
+    parts = path.split("__")
+    if len(parts) == 1:
+        return None
+
+    current_model = model
+    pending_joins: list[JoinSpec] = []
+    for rel_name in parts[:-1]:
+        mapper = sa_inspect(current_model)
+        if rel_name not in mapper.relationships:
+            return None
+        rel = mapper.relationships[rel_name]
+        target_model = rel.mapper.class_
+
+        local_cols = list(rel.local_columns)
+        remote_cols = list(rel.remote_side)
+        if len(local_cols) == 1 and len(remote_cols) == 1:
+            on_clause = getattr(current_model, local_cols[0].name) == getattr(
+                target_model, remote_cols[0].name
+            )
+        else:
+            from sqlalchemy import and_
+
+            on_clause = and_(
+                *(
+                    getattr(current_model, lc.name) == getattr(target_model, rc.name)
+                    for lc, rc in zip(local_cols, remote_cols)
+                )
+            )
+
+        pending_joins.append(JoinSpec(target_model=target_model, on_clause=on_clause, isouter=True))
+        current_model = target_model
+
+    col_name = parts[-1]
+    raw_col = getattr(current_model, col_name)
+    labelled = raw_col.label(path)
+    join_spec = pending_joins[0] if pending_joins else None
+    return TraversalColumn(col_expr=labelled, join_spec=join_spec, group_col=raw_col)
