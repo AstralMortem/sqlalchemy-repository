@@ -486,3 +486,5 @@ async def test_annotate_many_with_paginations(session, data):
     assert posts[0].title == "A"
     assert posts[0].min_rating == 3
     assert posts[0].max_rating == 4
+
+

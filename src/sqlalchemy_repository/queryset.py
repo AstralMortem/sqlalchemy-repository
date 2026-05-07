@@ -92,6 +92,7 @@ class QuerySet(Generic[ModelT]):
         return qs
 
     def _build_select(self):
+        annotation_exprs: dict[str, Any] = {}
         if self._annotations:
             annotation_exprs = {
                 alias: (
@@ -103,6 +104,16 @@ class QuerySet(Generic[ModelT]):
                 )
                 for alias, agg in self._annotations.items()
             }
+            
+
+        columns_mode = self._values_fields or self._values_list_fields
+
+        if columns_mode:
+            col_exprs = [
+                resolve_column(self._model, f).label(f) for f in columns_mode
+            ]
+            stmt = select(*col_exprs, *[expr.label(alias) for alias, expr in annotation_exprs.items()])
+        elif annotation_exprs:
             stmt = select(
                 self._model,
                 *[expr.label(alias) for alias, expr in annotation_exprs.items()],
@@ -121,9 +132,16 @@ class QuerySet(Generic[ModelT]):
             stmt = stmt.where(clause)
 
         # Group By
-        if self._annotations:
-            pks = resolve_pk_fields(self._model)
-            stmt = stmt.group_by(*pks)
+        if annotation_exprs:
+            if columns_mode:
+                non_agg_cols = [
+                    resolve_column(self._model, f) for f in columns_mode if f not in annotation_exprs
+                ]
+                if non_agg_cols:
+                    stmt = stmt.group_by(*non_agg_cols)
+            else:
+                pks = resolve_pk_fields(self._model)
+                stmt = stmt.group_by(*pks)
 
         # Order by
         for order_field in self._order_fields:
@@ -141,17 +159,34 @@ class QuerySet(Generic[ModelT]):
             stmt = stmt.offset(self._offset_val)
 
         # Relation loading
-        options = []
-        for path in self._select_related:
-            options.append(build_loader_option(self._model, path, joinedload))
+        if not columns_mode:
+            options = []
+            for path in self._select_related:
+                options.append(build_loader_option(self._model, path, joinedload))
 
-        for path in self._prefetch:
-            options.append(build_loader_option(self._model, path, selectinload))
+            for path in self._prefetch:
+                options.append(build_loader_option(self._model, path, selectinload))
 
-        if options:
-            stmt = stmt.options(*options)
+            if options:
+                stmt = stmt.options(*options)
 
         return stmt
+    
+    def _extract_results(self, result) -> list[Any]:
+        """Turn a raw execute() result into the right Python type."""
+        if self._values_fields:
+            return [dict(row._mapping) for row in result]
+
+        if self._values_list_fields:
+            if self._values_list_flat:
+                if len(self._values_list_fields) != 1:
+                    raise ValueError(
+                        "flat=True requires exactly one field in values_list()"
+                    )
+                return [row[0] for row in result]
+            return [tuple(row) for row in result]
+
+        return list(result.scalars().all())
 
     def _parse_order_field(self, field: str):
         if isinstance(field, F):
@@ -288,15 +323,18 @@ class QuerySet(Generic[ModelT]):
         return self._annotations and any(
             isinstance(v, Aggregate) for v in self._annotations.values()
         )
+    
+    def _is_columns_mode(self) -> bool:
+        return self._values_fields or self._values_list_fields
 
     async def all(self) -> list[ModelT]:
-        if self._is_annotated():
+        if self._is_annotated() and not self._is_columns_mode():
             return await self._execute_with_aggregation()
         result = await self._execute()
-        return result.scalars().all()
+        return self._extract_results(result)
 
     async def first(self) -> ModelT | None:
-        if self._is_annotated():
+        if self._is_annotated() and not self._is_columns_mode():
             qs = self._clone()
             qs._limit_val = 1
             res = await qs._execute_with_aggregation()
@@ -305,7 +343,8 @@ class QuerySet(Generic[ModelT]):
         if self._debug:
             log.debug("QuerySet SQL (first):\n%s", stmt)
         result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        rows = self._extract_results(result)
+        return rows[0] if rows else None
 
     async def last(self) -> ModelT | None:
         qs = self._clone()
@@ -364,6 +403,45 @@ class QuerySet(Generic[ModelT]):
         total = await self.count()
         items = await self.offset((page - 1) * size).limit(size).all()
         return items, total
+    
+    async def aggregate(self, **kw: Aggregate | F | Any):
+        if not kw:
+            return {}
+        
+        base_qs = self._clone()
+        base_qs._annotations = {}
+        base_qs._values_fields = None
+        base_qs._values_list_fields = None
+        base_qs._limit_val = None
+        base_qs._offset_val = None
+        base_qs._order_fields = []
+
+        subq = base_qs._build_select().subquery()
+
+        agg_cols: list[Any] = []
+        for alias, agg in kw.items():
+            if isinstance(agg, Aggregate):
+                # Re-resolve against the subquery so column references are valid.
+                expr = agg.resolve_subquery(subq)
+            elif isinstance(agg, F):
+                expr = agg._resolve()
+            else:
+                expr = agg
+            agg_cols.append(expr.label(alias))
+
+        stmt = select(*agg_cols).select_from(subq)
+
+        print(stmt.compile(compile_kwargs={"literal_bindings": True}))
+
+        if self._debug:
+            log.debug("QuerySet SQL (aggregate):\n%s", stmt)
+
+        result = await self._session.execute(stmt)
+        row = result.first()
+        if row is None:
+            return {alias: None for alias in kw}
+        return dict(row._mapping)
+
 
     async def explain(self) -> str:
         from sqlalchemy import text
