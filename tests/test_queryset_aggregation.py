@@ -1,6 +1,6 @@
 from sqlalchemy_repository import QuerySet, Count, Sum, Avg, Max, Min
 import pytest
-from utils import Post
+from utils import Post, User
 
 
 @pytest.fixture
@@ -190,7 +190,7 @@ class TestCountAggregate:
 
     async def test_count_distinct(self, qs):
         result = await qs.aggregate(n=Count("author_id", distinct=True))
-        assert result["n"] == 2  # three unique categories
+        assert result["n"] == 2  # 
 
     async def test_count_distinct_vs_non_distinct(self, qs):
         r_all = await qs.aggregate(n=Count("author_id"))
@@ -198,68 +198,6 @@ class TestCountAggregate:
         assert r_all["n"] == 5
         assert r_dist["n"] == 2
 
-
-# # ── resolve_subquery on Aggregate subclasses ──────────────────────────────────
-
-
-class TestResolveSubquery:
-    """
-    Unit-test the resolve_subquery hook in isolation by building a tiny
-    subquery from the real session and checking the SQL expression type.
-    """
-
-    async def test_sum_resolve_subquery(self, session):
-        from sqlalchemy import select
-        from sqlalchemy.sql.elements import Label
-
-        subq = select(
-            Post.id.label("id"),
-            Post.rating.label("rating"),
-        ).subquery()
-
-        agg = Sum("rating")
-        expr = agg.resolve_subquery(subq)
-        # Should be a func expression; wrapping in label() should not raise
-        labeled = expr.label("result")
-        assert labeled is not None
-
-    async def test_count_star_resolve_subquery(self, session):
-        from sqlalchemy import select
-
-        subq = select(Post.id.label("id")).subquery()
-        agg = Count()  # field="*"
-        expr = agg.resolve_subquery(subq)
-        assert expr is not None
-
-    async def test_count_distinct_resolve_subquery(self, session):
-        from sqlalchemy import select
-
-        subq = select(
-            Post.author_id.label("author_id"),
-        ).subquery()
-
-        agg = Count("author_id", distinct=True)
-        expr = agg.resolve_subquery(subq)
-        # distinct() applied — just check it doesn't raise and returns something
-        assert expr is not None
-
-    async def test_unknown_field_raises(self, session):
-        from sqlalchemy import select
-
-        subq = select(Post.id.label("id")).subquery()
-        agg = Sum("nonexistent_field")
-        with pytest.raises(ValueError):
-            agg.resolve_subquery(subq)
-
-    async def test_count_star_unknown_field_does_not_raise(self, session):
-        """COUNT(*) must never hit the column-lookup path."""
-        from sqlalchemy import select
-
-        # subquery has no "nonexistent" col, but field="*" skips lookup
-        subq = select(Post.id.label("id")).subquery()
-        agg = Count()  # field="*"
-        expr = agg.resolve_subquery(subq)  # must not raise
-        assert expr is not None
 
 
 # # ── aggregate() after values() ────────────────────────────────────────────────
@@ -279,3 +217,114 @@ class TestAggregateAfterValues:
     async def test_aggregate_strips_values_list_fields(self, qs):
         result = await qs.values_list("name").aggregate(n=Count())
         assert result["n"] == 5
+
+@pytest.fixture
+def user_qs(session, data):
+    return QuerySet(User, session)
+
+class TestRelationAggregation:
+
+    @pytest.mark.asyncio
+    async def test_aggregate_count_related_field(self,user_qs):
+
+        result = await user_qs.aggregate(
+            total_posts=Count("posts__id"),
+        )
+
+        assert result["total_posts"] == 5
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_min_related_field(self,user_qs):
+
+        result = await user_qs.aggregate(
+            min_rating=Min("posts__rating"),
+        )
+
+        assert result["min_rating"] == 1.0
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_max_related_field(self, user_qs):
+
+        result = await user_qs.aggregate(
+            max_rating=Max("posts__rating"),
+        )
+
+        assert result["max_rating"] == 5.0
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_avg_related_field(self,user_qs):
+
+        result = await user_qs.aggregate(
+            avg_rating=Avg("posts__rating"),
+        )
+
+        assert result["avg_rating"] == pytest.approx(3.0)
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_sum_related_field(self,user_qs):
+
+        result = await user_qs.aggregate(
+            total_rating=Sum("posts__rating"),
+        )
+
+        assert result["total_rating"] == 15.0
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_filtered_related_field(self, user_qs):
+
+        result = await user_qs.filter(id=1).aggregate(
+            total=Count("posts__id"),
+            min_rating=Min("posts__rating"),
+            max_rating=Max("posts__rating"),
+        )
+
+        assert result["total"] == 2
+        assert result["min_rating"] == 4.0
+        assert result["max_rating"] == 5.0
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_nested_related_field(self, user_qs):
+        result = await user_qs.aggregate(
+            total_comments=Count("posts__comments__id"),
+        )
+
+        assert result["total_comments"] == 3
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_nested_related_sum(self, user_qs):
+
+
+        result = await user_qs.aggregate(
+            comments_rating_sum=Sum("posts__comments__rating"),
+        )
+
+        assert result["comments_rating_sum"] == 9
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_related_with_empty_result(self, user_qs):
+        
+
+        result = await user_qs.filter(id=9999).aggregate(
+            total=Count("posts__id"),
+            min_rating=Min("posts__rating"),
+        )
+
+        assert result["total"] == 0
+        assert result["min_rating"] is None
+
+
+    @pytest.mark.asyncio
+    async def test_aggregate_distinct_related_count(self, user_qs):
+        result = await user_qs.aggregate(
+            total_authors=Count("posts__author_id", distinct=True),
+        )
+
+        assert result["total_authors"] == 2

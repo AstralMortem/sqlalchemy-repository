@@ -204,6 +204,63 @@ class QuerySet(Generic[ModelT]):
 
         return stmt
 
+    def _build_aggregate_select(self, aggregates:dict[str, Any]):
+        stmt = select()
+        
+        seen_join_target = set()
+        # apply joins
+        for spec in self._joins.joins:
+            if spec.target_model not in seen_join_target:
+                stmt = stmt.join(
+                    spec.target_model,
+                    spec.on_clause,
+                    isouter=spec.isouter,
+                )
+                seen_join_target.add(spec.target_model)
+
+        # apply filters
+        for clause in self._filters:
+            stmt = stmt.where(clause)
+
+        for clause in self._excludes:
+            stmt = stmt.where(clause)
+
+        agg_exprs = []
+        all_joins = []
+
+        for alias, agg in aggregates.items():
+            if isinstance(agg, Aggregate):
+                expr, joins = agg.resolve_subquery(self._model)
+                all_joins.extend(joins)
+            elif isinstance(agg, F):
+                expr = agg._resolve()
+            else:
+                expr = agg
+
+            agg_exprs.append(expr.label(alias))
+
+        for spec in all_joins:
+            if spec.target_model not in seen_join_target:
+                stmt = stmt.join(
+                    spec.target_model,
+                    spec.on_clause,
+                    isouter=spec.isouter,
+                )
+                seen_join_target.add(spec.target_model)
+
+        stmt = stmt.with_only_columns(*agg_exprs)
+
+        if self._distinct_on:
+            stmt = stmt.distinct()
+
+        stmt = stmt.select_from(self._model)
+
+        if self._debug:
+            log.debug("QuerySet SQL (aggregate):\n%s", stmt)
+        print(stmt)
+
+        return stmt
+
     def _extract_results(self, result) -> list[Any]:
         """Turn a raw execute() result into the right Python type."""
         if self._values_fields:
@@ -455,29 +512,13 @@ class QuerySet(Generic[ModelT]):
         base_qs._offset_val = None
         base_qs._order_fields = []
 
-        subq = base_qs._build_select().subquery()
-
-        agg_cols: list[Any] = []
-        for alias, agg in kw.items():
-            if isinstance(agg, Aggregate):
-                # Re-resolve against the subquery so column references are valid.
-                expr = agg.resolve_subquery(subq)
-            elif isinstance(agg, F):
-                expr = agg._resolve()
-            else:
-                expr = agg
-            agg_cols.append(expr.label(alias))
-
-        stmt = select(*agg_cols).select_from(subq)
-
-        if self._debug:
-            log.debug("QuerySet SQL (aggregate):\n%s", stmt)
-
+        stmt = self._build_aggregate_select(kw)
         result = await self._session.execute(stmt)
         row = result.first()
+
         if row is None:
-            return {alias: None for alias in kw}
-        return dict(row._mapping)
+          return {alias: None for alias in kw}
+        return dict(row._mapping)  
 
     async def explain(self) -> str:
         from sqlalchemy import text

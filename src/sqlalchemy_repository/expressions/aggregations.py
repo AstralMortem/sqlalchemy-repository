@@ -1,7 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Generic
-from ..utils.columns import resolve_column
+from ..utils.columns import resolve_column, resolve_path_with_joins
 from sqlalchemy import distinct, func
 from ..types import ModelT
 
@@ -28,24 +28,16 @@ class Aggregate(Generic[ModelT]):
     def _get_expr(self, model):
         col = self._get_column(model)
         return self._sa_func(col)
-
-    def _get_subq_column(self, subq):
-        col = subq.c.get(self.field)
-        if col is None:
-            raise ValueError(
-                f"Aggregate field {self.field!r} is not a direct column on the subquery"
-            )
-        return col
-
-    def _get_subq_expr(self, subq):
-        col = self._get_subq_column(subq)
-        return self._sa_func(col)
+    
+    def _get_sub_expr(self, model):
+        col, joins = resolve_path_with_joins(model, self.field)
+        return self._sa_func(col), joins
 
     def resolve(self, model: type[ModelT]) -> Any:
         return self._get_expr(model)
 
-    def resolve_subquery(self, subq):
-        return self._get_subq_expr(subq)
+    def resolve_subquery(self, model: type[ModelT]):
+        return self._get_sub_expr(model)
 
 
 class Count(Aggregate[ModelT]):
@@ -55,22 +47,25 @@ class Count(Aggregate[ModelT]):
         self.field = field
         self.distinct = distinct
 
-    def _get_subq_expr(self, subq):
+    def _get_expr(self, model):
         if self.field == "*":
-            return self._sa_func(None)
-        col = super()._get_subq_column(subq)
+            col = None
+        else:
+            col = super()._get_column(model)
         if self.distinct:
             return self._sa_func(distinct(col))
         return self._sa_func(col)
 
-    def _get_expr(self, model):
+    def _get_sub_expr(self, model):
+        joins = []
         if self.field == "*":
-            col = self._sa_func(None)
-
-        col = super()._get_column(model)
+            col = None
+        else:
+            col, joins = resolve_path_with_joins(model, self.field)
+        
         if self.distinct:
-            self._sa_func(distinct(col))
-        return self._sa_func(col)
+            return self._sa_func(distinct(col)), joins
+        return self._sa_func(col), joins
 
 
 class Sum(Aggregate[ModelT]):
