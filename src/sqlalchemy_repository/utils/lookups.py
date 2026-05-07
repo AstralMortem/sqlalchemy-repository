@@ -2,6 +2,7 @@ from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import ClauseElement, Column
+from sqlalchemy.orm import InstrumentedAttribute
 
 
 class Lookup(StrEnum):
@@ -37,7 +38,7 @@ _LOOKUP_ALIASES: dict[str, str] = {
 ALL_LOOKUPS = {e.value for e in Lookup} | set(_LOOKUP_ALIASES)
 
 
-def apply_lookup(column: Column, lookup: str, value: Any) -> ClauseElement:
+def apply_lookup(column: InstrumentedAttribute, lookup: str, value: Any) -> ClauseElement:
     """Apply a lookup string to a SQLAlchemy column attribute."""
     lookup = _LOOKUP_ALIASES.get(lookup, lookup)
 

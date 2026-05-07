@@ -1,5 +1,5 @@
 from typing import Any
-from sqlalchemy import column
+from sqlalchemy import ColumnClause, column
 
 
 def _coerce(value: Any) -> Any:
@@ -17,7 +17,7 @@ class F:
 
     __slots__ = ("_name", "_expr")
 
-    def __init__(self, name: str, _expr: Any = None) -> None:
+    def __init__(self, name: str, _expr: ColumnClause | None = None) -> None:
         self._name = name
         self._expr = _expr  # wrapped SA column expression (resolved lazily)
 
@@ -53,7 +53,7 @@ class F:
     def desc(self) -> Any:
         return self._resolve().desc()
 
-    def _resolve(self) -> Any:
+    def _resolve(self) -> ColumnClause:
         if self._expr is not None:
             return self._expr
         # Return a placeholder column; real resolution happens in QuerySet

@@ -3,7 +3,7 @@ import copy
 import logging
 from sqlalchemy import func, literal_column, not_, select
 from .types import ModelT
-from typing import Any, AsyncIterator, Generic, Self
+from typing import Any, AsyncIterator, Generic
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 from .expressions import Q, F
@@ -74,7 +74,7 @@ class QuerySet(Generic[ModelT]):
 
     def _add_filters_from_kw(
         self, kw: dict[str, Any], qs: "QuerySet[ModelT]", negate: bool = False
-    ):
+    ) -> "QuerySet[ModelT]":
         for k, v in kw.items():
             clause, joins = build_filter_clause(self._model, k, v)
             for j in joins:
@@ -84,7 +84,9 @@ class QuerySet(Generic[ModelT]):
             qs._filters.append(clause)
         return qs
 
-    def _add_q_obj(self, q_objs: tuple["Q", ...], qs: "QuerySet[ModelT]", negate: bool = False):
+    def _add_q_obj(
+        self, q_objs: tuple["Q", ...], qs: "QuerySet[ModelT]", negate: bool = False
+    ) -> "QuerySet[ModelT]":
         for q in q_objs:
             if negate:
                 q = ~q
@@ -236,44 +238,44 @@ class QuerySet(Generic[ModelT]):
         col = resolve_column(self._model, name)
         return col.desc() if desc else col.asc()
 
-    def filter(self, *q: Q, **kw) -> Self:
+    def filter(self, *q: Q, **kw) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs = self._add_q_obj(q, qs)
         qs = self._add_filters_from_kw(kw, qs)
         return qs
 
-    def exclude(self, *q: Q, **kw) -> Self:
+    def exclude(self, *q: Q, **kw) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs = self._add_q_obj(q, qs, negate=True)
         qs = self._add_filters_from_kw(kw, qs, negate=True)
         return qs
 
-    def order_by(self, *fields: str | F) -> Self:
+    def order_by(self, *fields: str | F) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._order_fields = list(fields)
         return qs
 
-    def distinct(self) -> Self:
+    def distinct(self) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._distinct_on = True
         return qs
 
-    def limit(self, n: int) -> Self:
+    def limit(self, n: int) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._limit_val = n
         return qs
 
-    def offset(self, n: int) -> Self:
+    def offset(self, n: int) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._offset_val = n
         return qs
 
-    def annotate(self, **kw: Aggregate | F | Any) -> Self:
+    def annotate(self, **kw: Aggregate | F | Any) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._annotations = {**qs._annotations, **kw}
         return qs
 
-    def values(self, *fields: str) -> Self:
+    def values(self, *fields: str) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._values_fields = list(fields)
         return qs
@@ -284,17 +286,17 @@ class QuerySet(Generic[ModelT]):
         qs._values_list_flat = flat
         return qs
 
-    def select_related(self, *fields: str) -> Self:
+    def select_related(self, *fields: str) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._select_related = list(fields)
         return qs
 
-    def prefetch_related(self, *fields: str) -> Self:
+    def prefetch_related(self, *fields: str) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._prefetch = list(fields)
         return qs
 
-    def debug(self) -> Self:
+    def debug(self) -> "QuerySet[ModelT]":
         qs = self._clone()
         qs._debug = True
         return qs
@@ -357,12 +359,12 @@ class QuerySet(Generic[ModelT]):
         return output
 
     def _is_annotated(self) -> bool:
-        return self._annotations and any(
-            isinstance(v, Aggregate) for v in self._annotations.values()
+        return bool(
+            self._annotations and any(isinstance(v, Aggregate) for v in self._annotations.values())
         )
 
     def _is_columns_mode(self) -> bool:
-        return self._values_fields or self._values_list_fields
+        return bool(self._values_fields or self._values_list_fields)
 
     async def all(self) -> list[ModelT]:
         if self._is_annotated() and not self._is_columns_mode():

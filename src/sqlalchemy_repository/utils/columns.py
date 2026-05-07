@@ -1,12 +1,14 @@
 from dataclasses import dataclass
-from typing import Any
-from sqlalchemy import inspect as sa_inspect
-from sqlalchemy.orm import RelationshipProperty, selectinload
+from typing import Any, Callable, Tuple
+from sqlalchemy import ColumnClause, Label, inspect as sa_inspect, ColumnElement
+from sqlalchemy.orm import RelationshipProperty, selectinload, mapped_column, InstrumentedAttribute
+from sqlalchemy.orm.strategy_options import _AbstractLoad
 from .joins import JoinSpec
 from .lookups import ALL_LOOKUPS, apply_lookup
+from ..types import ModelT
 
 
-def resolve_column(model: type, path: str) -> Any:
+def resolve_column(model: type[ModelT], path: str) -> InstrumentedAttribute:
     """
     Resolve a dotted / dunder path to a SQLAlchemy column.
 
@@ -26,27 +28,18 @@ def resolve_column(model: type, path: str) -> Any:
     return getattr(current_model, col_name)
 
 
-def resolve_pk_fields(model: type):
+def resolve_pk_fields(model: type[ModelT]) -> Tuple[ColumnElement[Any], ...]:
     return sa_inspect(model).primary_key
 
 
-def resolve_pk_name(model: type):
+def resolve_pk_name(model: type[ModelT]) -> str:
     pks = resolve_pk_fields(model)
     return pks[0].name
 
 
-def resolve_pk_column(model: type):
+def resolve_pk_column(model: type) -> InstrumentedAttribute:
     pk_name = resolve_pk_name(model)
     return resolve_column(model, pk_name)
-
-
-def resolve_parent_fk(model: type, joins: list[JoinSpec]):
-    if not joins:
-        raise ValueError("Aggregation requires at least one relation")
-
-    first_join = joins[0]
-    _, remote = first_join.on_clause.left, first_join.on_clause.right
-    return remote
 
 
 def deduplicate_joins(joins: list[JoinSpec]) -> list[JoinSpec]:
@@ -64,9 +57,9 @@ def deduplicate_joins(joins: list[JoinSpec]) -> list[JoinSpec]:
 
 
 def resolve_path_with_joins(
-    model: type,
+    model: type[ModelT],
     path: str,
-) -> tuple[Any, list[JoinSpec]]:
+) -> tuple[InstrumentedAttribute, list[JoinSpec]]:
     """
     Walk a dunder path, collect required JOINs, return (column, joins).
 
@@ -98,12 +91,12 @@ def resolve_path_with_joins(
         )
         current_model = next_model
 
-    col = getattr(current_model, parts[-1])
+    col: InstrumentedAttribute = getattr(current_model, parts[-1])
     return col, deduplicate_joins(joins)
 
 
 def build_filter_clause(
-    model: type,
+    model: type[ModelT],
     key: str,
     value: Any,
 ) -> tuple[Any, list["JoinSpec"]]:
@@ -129,10 +122,10 @@ def build_filter_clause(
     return clause, joins
 
 
-def build_loader_option(model: type, path: str, loader):
+def build_loader_option(model: type[ModelT], path: str, loader: Callable) -> _AbstractLoad:
 
     parts = path.split("__")
-    attr = getattr(model, parts[0])
+    attr: InstrumentedAttribute = getattr(model, parts[0])
 
     option = loader(attr)
 
@@ -151,12 +144,12 @@ def build_loader_option(model: type, path: str, loader):
 
 @dataclass
 class TraversalColumn:
-    col_expr: Any
+    col_expr: Label
     join_spec: JoinSpec | None
-    group_col: Any
+    group_col: ColumnElement
 
 
-def resolve_traversal_field(model: type, path: str) -> "TraversalColumn | None":
+def resolve_traversal_field(model: type[ModelT], path: str) -> "TraversalColumn | None":
     parts = path.split("__")
     if len(parts) == 1:
         return None
@@ -190,7 +183,7 @@ def resolve_traversal_field(model: type, path: str) -> "TraversalColumn | None":
         current_model = target_model
 
     col_name = parts[-1]
-    raw_col = getattr(current_model, col_name)
+    raw_col: ColumnElement = getattr(current_model, col_name)
     labelled = raw_col.label(path)
     join_spec = pending_joins[0] if pending_joins else None
     return TraversalColumn(col_expr=labelled, join_spec=join_spec, group_col=raw_col)

@@ -1,8 +1,9 @@
 from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field as dataclass_field
+from typing import Any, Generic
 from ..utils.columns import resolve_column
 from sqlalchemy import distinct, func
+from ..types import ModelT
 
 
 def group_aggregates(annotations: dict[str, Any]):
@@ -15,13 +16,13 @@ def group_aggregates(annotations: dict[str, Any]):
 
 
 @dataclass
-class Aggregate:
+class Aggregate(Generic[ModelT]):
     """Base class for SQL aggregate functions."""
 
     field: str
-    _sa_func: Any = field(default=None, repr=False, init=False)
+    _sa_func: Any = dataclass_field(default=None, repr=False, init=False)
 
-    def _get_column(self, model: type):
+    def _get_column(self, model: type[ModelT]):
         return resolve_column(model, self.field)
 
     def _get_expr(self, model):
@@ -40,14 +41,14 @@ class Aggregate:
         col = self._get_subq_column(subq)
         return self._sa_func(col)
 
-    def resolve(self, model: type) -> Any:
+    def resolve(self, model: type[ModelT]) -> Any:
         return self._get_expr(model)
 
     def resolve_subquery(self, subq):
         return self._get_subq_expr(subq)
 
 
-class Count(Aggregate):
+class Count(Aggregate[ModelT]):
     _sa_func = func.count
 
     def __init__(self, field: str = "*", distinct: bool = False) -> None:
@@ -72,17 +73,17 @@ class Count(Aggregate):
         return self._sa_func(col)
 
 
-class Sum(Aggregate):
+class Sum(Aggregate[ModelT]):
     _sa_func = func.sum
 
 
-class Avg(Aggregate):
+class Avg(Aggregate[ModelT]):
     _sa_func = func.avg
 
 
-class Min(Aggregate):
+class Min(Aggregate[ModelT]):
     _sa_func = func.min
 
 
-class Max(Aggregate):
+class Max(Aggregate[ModelT]):
     _sa_func = func.max

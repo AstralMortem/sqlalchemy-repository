@@ -10,5 +10,4 @@ ModelT = TypeVar("ModelT", bound=DeclarativeBase)
 PK = TypeVar("PK")
 
 FilterExpr = Union[ColumnElement[bool], "Q"]
-
 ColRef = Union[str, ColumnElement[Any]]
